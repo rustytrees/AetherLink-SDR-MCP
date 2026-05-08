@@ -8,13 +8,13 @@ Control Software Defined Radios and decode radio protocols through an AI-friendl
 
 ## Features
 
-- **Protocol Decoders**: ADS-B aircraft tracking, POCSAG pagers, AIS ship tracking, Meteor-M LRPT satellites, ISM band devices
+- **Protocol Decoders**: ADS-B aircraft tracking, ACARS data-link messages, POCSAG pagers, AIS ship tracking, Meteor-M LRPT satellites, ISM band devices
 - **Weather Satellites**: Meteor-M2-3/M2-4 LRPT decoding with SatDump
 - **Advanced Analysis**: Real-time spectrum analysis, waterfall displays, signal detection, frequency scanning
 - **Audio Recording**: Demodulate and record FM/AM audio as WAV files
 - **ISM Band Scanning**: Decode 433MHz/315MHz devices (weather stations, sensors, doorbells, tire pressure monitors)
 - **MCP Integration**: Seamless integration with Claude Desktop and other MCP clients
-- **26 MCP Tools**: Complete SDR control through natural language
+- **29 MCP Tools**: Complete SDR control through natural language
 
 ## Installation
 
@@ -58,6 +58,7 @@ AetherLink requires RTL-SDR drivers installed at the system level:
 |------|-------|---------------|---------|
 | RTL-SDR | `brew install rtl-sdr` | `sudo apt install rtl-sdr librtlsdr-dev` | Required - SDR drivers |
 | dump1090 | `brew install dump1090-fa` | `sudo apt install dump1090-fa` | Optional - ADS-B aircraft tracking |
+| acarsdec | Build from [source](https://github.com/f00b4r0/acarsdec) | Build from [source](https://github.com/f00b4r0/acarsdec) | Optional - ACARS aircraft data-link messages |
 | rtl_433 | `brew install rtl_433` | `sudo apt install rtl-433` | Optional - ISM band devices |
 | SatDump | `brew install satdump` | [PPA instructions](https://github.com/SatDump/SatDump) | Optional - satellite imaging |
 | multimon-ng | Built from [source](https://github.com/EliasOenal/multimon-ng) by installer | `sudo apt install multimon-ng` | Optional - POCSAG pagers |
@@ -130,6 +131,7 @@ You should see: "Successfully connected to RTL-SDR"
 | Protocol    | Description          | Status      |
 |-------------|---------------------|-------------|
 | **ADS-B**   | Aircraft tracking   | ✅ Ready    |
+| **ACARS**   | Aircraft data-link messages | ✅ Ready |
 | **POCSAG**  | Pager decoding      | ✅ Ready    |
 | **AIS**     | Ship tracking       | ✅ Ready    |
 | **Meteor-M LRPT**| Weather satellites (M2-3, M2-4) | ✅ Ready |
@@ -145,6 +147,12 @@ You should see: "Successfully connected to RTL-SDR"
 - Optional aircraft registration/type/operator lookup via hexdb.io
 - Emits live tracking links for observed ICAO addresses
 - **FULLY TESTED AND WORKING**
+
+**ACARS (VHF data link):**
+- Uses `acarsdec` subprocess with RTL-SDR capture
+- Defaults to common ACARS channels: 131.550, 131.525, 131.725, 130.025, 130.450 MHz
+- Saves full, one-line, and JSON output under `/tmp/acars_*`
+- Parses recent messages and exposes aircraft/flight/message summaries through MCP
 
 **POCSAG (152/454/929 MHz):**
 - Uses `multimon-ng` for professional decoding
@@ -171,7 +179,7 @@ You should see: "Successfully connected to RTL-SDR"
 - Weather stations, sensors, doorbells, tire pressure monitors, remote controls
 - Common frequencies: 433.92 MHz (EU/Asia), 315 MHz (NA), 868 MHz (EU), 915 MHz (NA)
 
-## Available MCP Tools (26 Total)
+## Available MCP Tools (29 Total)
 
 ### Core SDR Control (5 tools)
 - `sdr_connect` - Connect to RTL-SDR or HackRF
@@ -180,10 +188,13 @@ You should see: "Successfully connected to RTL-SDR"
 - `sdr_set_gain` - Set gain (dB or 'auto')
 - `sdr_get_status` - Get hardware status
 
-### Aviation (3 tools)
+### Aviation (6 tools)
 - `aviation_track_aircraft` - Start ADS-B tracking on 1090 MHz
 - `aviation_stop_tracking` - Stop tracking
 - `aviation_get_aircraft` - Get list of tracked aircraft
+- `aviation_start_acars` - Start ACARS data-link decoding
+- `aviation_stop_acars` - Stop ACARS decoding
+- `aviation_get_acars_messages` - Get decoded ACARS messages
 
 ### Pager Decoding (3 tools)
 - `pager_start_decoding` - Start POCSAG decoder
@@ -324,13 +335,14 @@ Show me the ISM devices
 ```
 AetherLink-SDR-MCP/
 ├── sdr_mcp/
-│   ├── server.py              # Main MCP server (26 tools)
+│   ├── server.py              # Main MCP server (29 tools)
 │   ├── __main__.py            # python -m sdr_mcp entry point
 │   ├── hardware/
 │   │   ├── base.py            # Abstract SDR device base class
 │   │   ├── rtlsdr.py         # RTL-SDR interface
 │   │   └── hackrf.py         # HackRF interface
 │   ├── decoders/
+│   │   ├── acars.py          # ACARS data-link message parser
 │   │   ├── pocsag.py         # POCSAG pager decoder
 │   │   ├── ais.py            # AIS ship decoder
 │   │   ├── rtl433.py         # ISM band device decoder
@@ -348,12 +360,13 @@ AetherLink-SDR-MCP/
 
 **Device Management:**
 - RTL-SDR and subprocess decoders use **exclusive device access**
-- Python SDR control and subprocess tools (dump1090, rtl_433) cannot run simultaneously
+- Python SDR control and subprocess tools (dump1090, acarsdec, rtl_433) cannot run simultaneously
 - Subprocess-based decoders automatically disconnect Python SDR
 - Stopping decoder reconnects Python SDR control
 
 **Decoders:**
 - ADS-B: `dump1090` subprocess + pyModeS + optional hexdb.io lookup
+- ACARS: `acarsdec` subprocess with full, one-line, and JSON output parsing
 - ISM Band: `rtl_433` subprocess with JSON output + multi-frequency hopping
 - POCSAG: `rtl_fm` + `multimon-ng` pipeline
 - AIS: Built-in GMSK demodulator (simplified)

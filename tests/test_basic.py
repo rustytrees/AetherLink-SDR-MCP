@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 def test_import():
     """Test that the package can be imported"""
     import sdr_mcp
-    assert sdr_mcp.__version__ == "0.1.2"
+    assert sdr_mcp.__version__ == "0.1.3"
 
 
 def test_server_creation():
@@ -76,6 +76,37 @@ def test_adsb_decoder_decodes_valid_messages():
     assert stats["total_aircraft_seen"] == 2
     assert stats["identified_callsigns"] == 1
     assert stats["descending"] == 1
+
+
+def test_acars_decoder_reads_json_output(tmp_path):
+    """Test ACARS decoder parsing for acarsdec JSON output."""
+    from sdr_mcp.decoders.acars import (
+        ACARS_DEFAULT_FREQUENCIES_MHZ,
+        ACARSDecoder,
+    )
+
+    output_dir = tmp_path / "acars"
+    output_dir.mkdir()
+    (output_dir / "messages.json").write_text(
+        '{"timestamp":"2026-05-08T12:00:00Z","aircraft":"N123AB",'
+        '"flight":"AB123","frequency":131550000,"label":"Q0",'
+        '"text":"HELLO"}\n'
+    )
+
+    decoder = ACARSDecoder()
+    decoder.start_session(str(output_dir), ACARS_DEFAULT_FREQUENCIES_MHZ, 40)
+
+    messages = decoder.refresh()
+    assert len(messages) == 1
+    assert messages[0]["aircraft"] == "N123AB"
+    assert messages[0]["flight"] == "AB123"
+    assert messages[0]["frequency_mhz"] == 131.55
+    assert messages[0]["text"] == "HELLO"
+
+    stats = decoder.get_statistics()
+    assert stats["total_messages"] == 1
+    assert stats["aircraft_seen"] == 1
+    assert stats["flights_seen"] == 1
 
 
 if __name__ == "__main__":

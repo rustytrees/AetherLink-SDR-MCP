@@ -181,6 +181,9 @@ install_system_deps() {
 
     # dump1090
     install_dump1090
+
+    # acarsdec
+    install_acarsdec
 }
 
 setup_linux_udev() {
@@ -341,6 +344,16 @@ install_dump1090() {
     esac
 }
 
+install_acarsdec() {
+    if command -v acarsdec &>/dev/null; then
+        ok "acarsdec already installed"
+        return
+    fi
+
+    warn "acarsdec is optional and enables ACARS aircraft data-link decoding."
+    warn "Build from source: https://github.com/f00b4r0/acarsdec"
+}
+
 # ─── Install AetherLink Python package ────────────────────────────────────────
 
 install_aetherlink() {
@@ -428,6 +441,7 @@ print_summary() {
     echo "  System tools:"
     check_tool rtl_test    "RTL-SDR drivers"
     check_tool dump1090    "ADS-B decoder"
+    check_tool acarsdec    "ACARS decoder"
     check_tool rtl_433     "ISM band decoder"
     check_tool satdump     "Satellite decoder"
     check_tool multimon-ng "POCSAG decoder"

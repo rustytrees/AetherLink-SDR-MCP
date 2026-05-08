@@ -29,6 +29,7 @@ from .analysis.spectrum import SpectrumAnalyzer, SignalRecorder, FrequencyScanne
 from .utils.validators import sanitize_path_component, is_restricted_frequency, find_binary
 
 from . import __version__
+from .decoders.acars import ACARS_DEFAULT_FREQUENCIES_MHZ, ACARSDecoder
 from .decoders.adsb import ADSBDecoder, ADSB_AVAILABLE
 from .decoders.pocsag import POCSAGDecoder
 from .decoders.ais import AISDecoder
@@ -80,6 +81,7 @@ class SDRMCPServer:
             ),
         )
         self.sdr: Optional[SDRDevice] = None
+        self.acars_decoder = ACARSDecoder()
         self.adsb_decoder = ADSBDecoder()
         self.pocsag_decoder = POCSAGDecoder()
         self.ais_decoder = AISDecoder()
@@ -216,6 +218,56 @@ class SDRMCPServer:
                                 "type": "boolean",
                                 "description": "Resolve registration, type, and operator via hexdb.io",
                                 "default": True,
+                            },
+                        },
+                    }
+                ),
+                Tool(
+                    name="aviation_start_acars",
+                    description="Start decoding ACARS aircraft data-link messages",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "duration": {
+                                "type": "integer",
+                                "description": (
+                                    "Monitoring duration in seconds; 0 runs until stopped"
+                                ),
+                                "default": 120,
+                                "minimum": 0,
+                            },
+                            "gain": {
+                                "type": "number",
+                                "description": "RTL-SDR gain in dB for acarsdec",
+                                "default": 40,
+                            },
+                            "frequencies": {
+                                "type": "array",
+                                "description": "ACARS frequencies in MHz",
+                                "items": {"type": "number"},
+                                "default": ACARS_DEFAULT_FREQUENCIES_MHZ,
+                                "minItems": 1,
+                            },
+                        },
+                    }
+                ),
+                Tool(
+                    name="aviation_stop_acars",
+                    description="Stop ACARS decoding",
+                    inputSchema={"type": "object", "properties": {}}
+                ),
+                Tool(
+                    name="aviation_get_acars_messages",
+                    description="Get decoded ACARS aircraft data-link messages",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "max_messages": {
+                                "type": "integer",
+                                "description": "Maximum recent messages to return",
+                                "default": 20,
+                                "minimum": 1,
+                                "maximum": 200,
                             },
                         },
                     }
@@ -735,6 +787,124 @@ class SDRMCPServer:
                         summary += f"  {label}: {aircraft['tracking_url']}\n"
 
                 return [TextContent(type="text", text=summary)]
+
+            elif name == "aviation_start_acars":
+                existing_task = self.active_decoders.get("acars")
+                if existing_task:
+                    if existing_task.done():
+                        self.active_decoders.pop("acars", None)
+                    else:
+                        return [TextContent(
+                            type="text",
+                            text="ACARS decoding already active",
+                        )]
+
+                duration_arg = arguments.get("duration", 120)
+                duration = 120 if duration_arg is None else int(duration_arg)
+                gain = float(arguments.get("gain", 40))
+                frequencies = [
+                    float(freq) for freq in arguments.get(
+                        "frequencies",
+                        ACARS_DEFAULT_FREQUENCIES_MHZ,
+                    )
+                ]
+
+                if duration < 0:
+                    raise SDRError("duration must be 0 or greater")
+                if not frequencies:
+                    raise SDRError("At least one ACARS frequency is required")
+                if len(frequencies) > 16:
+                    raise SDRError("Maximum 16 ACARS frequencies allowed")
+                for freq in frequencies:
+                    if not 100.0 <= freq <= 150.0:
+                        raise SDRError(f"ACARS frequency out of range: {freq} MHz")
+
+                try:
+                    task = asyncio.create_task(
+                        self._acars_decoder_task(
+                            duration=duration,
+                            gain=gain,
+                            frequencies_mhz=frequencies,
+                        )
+                    )
+                    self.active_decoders["acars"] = task
+                    await asyncio.sleep(1.5)
+
+                    if task.done():
+                        self.active_decoders.pop("acars", None)
+                        try:
+                            await task
+                        except Exception as e:
+                            return [TextContent(
+                                type="text",
+                                text=f"Failed to start ACARS decoding: {str(e)}",
+                            )]
+
+                    duration_msg = (
+                        "until stopped" if duration <= 0 else f"for {duration} seconds"
+                    )
+                    freq_text = ", ".join(f"{freq:.3f}" for freq in frequencies)
+                    return [TextContent(
+                        type="text",
+                        text=(
+                            "Started ACARS decoding with acarsdec\n"
+                            f"Frequencies: {freq_text} MHz\n"
+                            f"Gain: {gain:g} dB | Duration: {duration_msg}\n"
+                            f"Output: {self.acars_decoder.output_dir}\n\n"
+                            "NOTE: Python SDR control is paused while decoding.\n"
+                            "Use aviation_stop_acars to regain SDR control."
+                        ),
+                    )]
+                except Exception as e:
+                    return [TextContent(
+                        type="text",
+                        text=f"Failed to start ACARS decoding: {str(e)}",
+                    )]
+
+            elif name == "aviation_stop_acars":
+                task = self.active_decoders.pop("acars", None)
+                if task and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    return [TextContent(type="text", text="Stopped ACARS decoding")]
+                return [TextContent(type="text", text="ACARS decoding not active")]
+
+            elif name == "aviation_get_acars_messages":
+                max_messages = int(arguments.get("max_messages", 20))
+                if max_messages < 1 or max_messages > 200:
+                    raise SDRError("max_messages must be between 1 and 200")
+
+                self.acars_decoder.refresh()
+                messages = self.acars_decoder.get_messages(limit=max_messages)
+                stats = self.acars_decoder.get_statistics()
+                active_task = self.active_decoders.get("acars")
+                decoder_active = bool(active_task and not active_task.done())
+
+                result = f"ACARS Decoder ({'active' if decoder_active else 'stopped'})\n"
+                result += f"Messages decoded: {stats['total_messages']}\n"
+                result += f"Aircraft seen: {stats['aircraft_seen']}\n"
+                result += f"Flights seen: {stats['flights_seen']}\n"
+                result += f"Output: {stats['output_dir'] or 'not started'}\n\n"
+
+                if not messages:
+                    result += "No ACARS messages decoded yet. Try daytime monitoring.\n"
+                else:
+                    for message in messages:
+                        frequency_mhz = message.get("frequency_mhz")
+                        header = " | ".join(filter(None, [
+                            message.get("timestamp"),
+                            frequency_mhz and f"{frequency_mhz:.3f} MHz",
+                            message.get("aircraft"),
+                            message.get("flight"),
+                            message.get("label"),
+                        ]))
+                        result += f"{header}\n"
+                        result += f"{message.get('text') or '[no text]'}\n\n"
+
+                return [TextContent(type="text", text=result)]
 
             elif name == "pager_start_decoding":
                 if not self.sdr:
@@ -1277,6 +1447,12 @@ class SDRMCPServer:
                     description="Currently tracked aircraft from ADS-B"
                 ),
                 Resource(
+                    uri="aviation://acars",
+                    name="ACARS Messages",
+                    mimeType="application/json",
+                    description="Decoded ACARS aircraft data-link messages"
+                ),
+                Resource(
                     uri="spectrum://waterfall",
                     name="Waterfall Data",
                     mimeType="application/json",
@@ -1321,6 +1497,16 @@ class SDRMCPServer:
                     "decoder_active": bool(active_task and not active_task.done())
                 }
                 return json.dumps(aircraft_data, indent=2, default=str)
+
+            elif uri == "aviation://acars":
+                active_task = self.active_decoders.get("acars")
+                self.acars_decoder.refresh()
+                acars_data = {
+                    "messages": self.acars_decoder.get_messages(),
+                    "statistics": self.acars_decoder.get_statistics(),
+                    "decoder_active": bool(active_task and not active_task.done())
+                }
+                return json.dumps(acars_data, indent=2, default=str)
                 
             elif uri == "spectrum://waterfall":
                 waterfall_data = self.spectrum_analyzer.get_waterfall_data(50)
@@ -1341,7 +1527,163 @@ class SDRMCPServer:
                 
             else:
                 return f"Unknown resource: {uri}"
-                
+
+    def _find_acarsdec(self) -> str:
+        """Find acarsdec from ACARSDEC, PATH, or local tools."""
+        env_path = os.environ.get("ACARSDEC")
+        if env_path and os.path.isfile(env_path) and os.access(env_path, os.X_OK):
+            return env_path
+
+        install_hint = "build from https://github.com/f00b4r0/acarsdec"
+        try:
+            return find_binary("acarsdec", install_hint)
+        except FileNotFoundError:
+            pass
+
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        local_path = os.path.join(repo_root, "tools", "bin", "acarsdec")
+        if os.path.isfile(local_path) and os.access(local_path, os.X_OK):
+            return local_path
+
+        return find_binary("acarsdec", install_hint)
+
+    async def _acars_decoder_task(
+        self,
+        duration: int = 120,
+        gain: float = 40,
+        frequencies_mhz: Optional[List[float]] = None,
+    ):
+        """Background task for ACARS decoding using acarsdec."""
+        logger.info("Starting ACARS decoder with acarsdec subprocess")
+        frequencies_mhz = frequencies_mhz or list(ACARS_DEFAULT_FREQUENCIES_MHZ)
+
+        output_dir = f"/tmp/acars_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        os.makedirs(output_dir, exist_ok=True)
+        self.acars_decoder.start_session(output_dir, frequencies_mhz, gain)
+
+        previous_sdr = self.sdr
+        previous_kind = None
+        previous_device_index = 0
+        previous_settings = {}
+        if self.sdr:
+            previous_kind = "hackrf" if isinstance(self.sdr, HackRFDevice) else "rtlsdr"
+            previous_device_index = getattr(self.sdr, "device_index", 0)
+            previous_settings = {
+                "frequency": getattr(self.sdr, "frequency", None),
+                "sample_rate": getattr(self.sdr, "sample_rate", None),
+                "gain": getattr(self.sdr, "gain", None),
+            }
+            logger.info("Releasing SDR device for acarsdec")
+            await self.sdr.disconnect()
+            self.sdr = None
+            import gc
+            gc.collect()
+            await asyncio.sleep(0.5)
+
+        process = None
+        stderr_task = None
+        stderr_lines: List[str] = []
+        try:
+            acarsdec_path = self._find_acarsdec()
+            cmd = [
+                acarsdec_path,
+                "--output", f"full:file:{output_dir}/messages.txt",
+                "--output", f"oneline:file:{output_dir}/oneline.txt",
+                "--output", f"json:file:{output_dir}/messages.json",
+                "--rtlsdr", "0",
+                "-g", str(gain),
+                *[f"{freq:.3f}" for freq in frequencies_mhz],
+            ]
+
+            logger.info(f"Starting acarsdec subprocess: {' '.join(cmd)}")
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            async def capture_stderr():
+                try:
+                    while True:
+                        line = await process.stderr.readline()
+                        if not line:
+                            break
+                        decoded = line.decode(errors="replace").strip()
+                        if decoded:
+                            stderr_lines.append(decoded)
+                            logger.info(f"acarsdec: {decoded}")
+                except Exception as e:
+                    logger.debug(f"ACARS stderr monitor ended: {e}")
+
+            stderr_task = asyncio.create_task(capture_stderr())
+            deadline = (
+                asyncio.get_event_loop().time() + duration
+                if duration and duration > 0 else None
+            )
+
+            while True:
+                if process.returncode is not None:
+                    if process.returncode != 0:
+                        error_msg = "\n".join(stderr_lines[-10:])
+                        raise RuntimeError(
+                            f"acarsdec exited with code {process.returncode}: {error_msg}"
+                        )
+                    break
+
+                if deadline and asyncio.get_event_loop().time() >= deadline:
+                    logger.info("ACARS decoding duration reached")
+                    break
+
+                self.acars_decoder.refresh()
+                await asyncio.sleep(2.0)
+
+        except asyncio.CancelledError:
+            logger.info("ACARS decoding stopped by user")
+            raise
+        except Exception as e:
+            import traceback
+            logger.error(f"ACARS decoder error: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            raise
+        finally:
+            self.acars_decoder.refresh()
+            if process:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=2.0)
+                except (asyncio.TimeoutError, ProcessLookupError):
+                    process.kill()
+                    try:
+                        await process.wait()
+                    except Exception:
+                        pass
+            if stderr_task:
+                stderr_task.cancel()
+                try:
+                    await stderr_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            if previous_sdr:
+                logger.info("Reconnecting Python SDR control after ACARS decoding")
+                self.sdr = (
+                    HackRFDevice(previous_device_index)
+                    if previous_kind == "hackrf" else RTLSDRDevice()
+                )
+                if await self.sdr.connect():
+                    try:
+                        if previous_settings.get("sample_rate"):
+                            await self.sdr.set_sample_rate(previous_settings["sample_rate"])
+                        if previous_settings.get("frequency"):
+                            await self.sdr.set_frequency(previous_settings["frequency"])
+                        if previous_settings.get("gain") is not None:
+                            await self.sdr.set_gain(previous_settings["gain"])
+                    except Exception as e:
+                        logger.warning(f"Could not restore SDR settings: {e}")
+                else:
+                    logger.warning("Failed to reconnect SDR after ACARS decoding")
+                    self.sdr = None
+
     async def _adsb_decoder_task(
         self,
         gain: str = "40",
@@ -1840,6 +2182,11 @@ def setup_claude_desktop():
         ("rtl_test", "RTL-SDR drivers", "brew install rtl-sdr"),
         # Homebrew package name is dump1090-fa; the installed binary is dump1090.
         ("dump1090", "ADS-B decoder", "brew install dump1090-fa"),
+        (
+            "acarsdec",
+            "ACARS decoder",
+            "build from https://github.com/f00b4r0/acarsdec",
+        ),
         ("rtl_433", "ISM band decoder", "brew install rtl_433"),
         ("satdump", "Satellite decoder", "brew install satdump"),
     ]:

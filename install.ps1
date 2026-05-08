@@ -122,6 +122,17 @@ function Install-SystemDeps {
         }
     }
 
+    # acarsdec
+    if (Get-Command acarsdec -ErrorAction SilentlyContinue) {
+        Write-Ok "acarsdec found"
+    } else {
+        if (Prompt-YesNo "Open acarsdec source page? (ACARS aircraft data-link decoding)") {
+            Start-Process "https://github.com/f00b4r0/acarsdec"
+        } else {
+            Write-Warn "Skipped acarsdec (optional)"
+        }
+    }
+
     Write-Host ""
 }
 
@@ -272,6 +283,7 @@ function Print-Summary {
     $tools = @(
         @("rtl_test",    "RTL-SDR drivers"),
         @("dump1090",    "ADS-B decoder"),
+        @("acarsdec",    "ACARS decoder"),
         @("rtl_433",     "ISM band decoder"),
         @("satdump",     "Satellite decoder"),
         @("multimon-ng", "POCSAG decoder")
